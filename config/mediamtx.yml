@@ -1,0 +1,27 @@
+# Dedicated instance: production's 8554/8889/8189/9997 are deliberately unused.
+logLevel: info
+logDestinations: [stdout]
+api: true
+apiAddress: :19997
+rtmp: false
+hls: false
+rtsp: true
+rtspAddress: :18554
+# The pipeline publishes and consumes RTSP over TCP; do not allocate the default UDP RTP ports.
+rtspTransports: [tcp]
+webrtc: true
+webrtcAddress: :18889
+webrtcEncryption: false
+webrtcAllowOrigins: ['*']
+webrtcIPsFromInterfaces: true
+webrtcAdditionalHosts: []
+webrtcLocalUDPAddress: :18189
+srt: false
+moq: false
+pathDefaults:
+  sourceOnDemand: true
+  sourceOnDemandStartTimeout: 20s
+  sourceOnDemandCloseAfter: 60s
+# Startup generates exact enabled-camera direct-pull paths in a private 0600
+# file under run/. Camera URLs never belong in this checked-in template.
+paths: {}

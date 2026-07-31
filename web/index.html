@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Local VMS — person detection</title><link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header><h1>Local VMS — live video + metadata overlays</h1><span id="system">Connecting…</span></header>
+  <main id="grid" aria-live="polite"></main>
+  <template id="tile-template">
+    <section class="tile">
+      <div class="title">
+        <strong></strong>
+        <span class="title-actions">
+          <span class="state">connecting</span>
+          <button class="detection-toggle" type="button" aria-pressed="false"
+                  title="Enable person detection" aria-label="Enable person detection">○</button>
+        </span>
+      </div>
+      <div class="camera-stage"><video autoplay muted playsinline></video><canvas class="camera-overlay" aria-hidden="true"></canvas>
+        <div class="offline">Video offline — reconnecting</div></div>
+      <dl>
+        <div><dt>Video</dt><dd class="video-status">Connecting</dd></div>
+        <div><dt>Path</dt><dd class="video-path">—</dd></div>
+        <div><dt>Codec</dt><dd class="codec-status">Expected HEVC</dd></div>
+        <div><dt>Browser RTP</dt><dd class="browser-stats">—</dd></div>
+        <div><dt>Glass-to-glass</dt><dd class="glass-latency">Unmeasured</dd></div>
+        <div><dt>Source</dt><dd class="source-stats">—</dd></div>
+        <div><dt>Detection</dt><dd class="detector-status">Off</dd></div>
+        <div><dt>Detector detail</dt><dd class="detector-message">—</dd></div>
+        <div><dt>YOLO</dt><dd class="inference">—</dd></div>
+        <div><dt>Track age</dt><dd class="age">—</dd></div>
+        <div><dt>People</dt><dd class="people">0</dd></div>
+        <div><dt>Capture</dt><dd class="capture">—</dd></div>
+      </dl>
+    </section>
+  </template>
+  <script src="app.js"></script>
+</body>
+</html>

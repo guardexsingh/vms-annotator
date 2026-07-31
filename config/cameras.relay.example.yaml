@@ -1,0 +1,56 @@
+# Video-only direct-HEVC test configuration.
+cameras:
+  - id: cam01
+    name: Camera 1
+    url: ${CAM01_URL}
+    enabled: true
+    rtsp_transport: tcp
+    detection_enabled: false
+    detection_source: local_mediamtx
+  - id: cam02
+    name: Camera 2
+    url: ${CAM02_URL}
+    enabled: true
+    rtsp_transport: tcp
+    detection_enabled: false
+    detection_source: local_mediamtx
+  - id: cam03
+    name: Camera 3
+    url: ${CAM03_URL}
+    enabled: true
+    rtsp_transport: tcp
+    detection_enabled: false
+    detection_source: local_mediamtx
+
+detection:
+  enabled: false
+  model: yolo11n.pt
+  image_size: 640
+  confidence: 0.40
+  classes: [0]
+  target_fps_per_camera: 5
+  result_ttl_ms: 750
+  latest_frame_only: true
+
+metadata:
+  transport: websocket
+  path: /ws/detections
+
+pipeline:
+  mode: native
+
+video:
+  mode: direct_hevc
+  allow_transcode_fallback: false
+
+output:
+  codec: hevc
+  pixel_format: yuv420p
+  low_latency: true
+  fps: null
+
+service:
+  host: 0.0.0.0
+  port: 18080
+  public_host: ${PUBLIC_HOST:-127.0.0.1}
+  whep_port: 18889

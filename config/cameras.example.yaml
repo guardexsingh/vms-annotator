@@ -1,0 +1,84 @@
+cameras:
+  - id: cam01
+    name: Camera 1
+    url: ${CAM01_URL}
+    enabled: true
+    rtsp_transport: tcp
+    detection_enabled: true
+    detection_source: local_mediamtx
+  - id: cam02
+    name: Camera 2
+    url: ${CAM02_URL}
+    enabled: true
+    rtsp_transport: tcp
+    detection_enabled: true
+    detection_source: local_mediamtx
+  - id: cam03
+    name: Camera 3
+    url: ${CAM03_URL}
+    enabled: true
+    rtsp_transport: tcp
+    detection_enabled: true
+    detection_source: local_mediamtx
+
+detection:
+  enabled: true
+  model: yolo11n.pt
+  image_size: 640
+  confidence: 0.40
+  classes: [0]
+  target_fps_per_camera: 1
+  result_ttl_ms: 2000
+  latest_frame_only: true
+  backend: auto
+  allow_backend_fallback: true
+  device: auto
+  precision: auto
+  batch_mode: serial
+  inference_workers: 1
+  torch_threads: 1
+  torch_interop_threads: 1
+  capture_fps: 1
+  capture_max_dimension: 640
+  max_frame_age_ms: 1500
+  max_batch_wait_ms: 20
+
+tracking:
+  enabled: true
+  tracker: bytetrack
+  track_high_thresh: 0.50
+  track_low_thresh: 0.10
+  new_track_thresh: 0.50
+  match_thresh: 0.80
+  track_buffer: 2
+  fuse_score: true
+  hold_box_ms: 1500
+  remove_track_ms: 2000
+  prediction_fps: 5
+  prediction_deadzone_norm: 0.002
+  max_prediction_displacement_norm_per_second: 0.25
+
+metadata:
+  transport: websocket
+  path: /ws/detections
+
+pipeline:
+  mode: native
+
+# Production-intended standalone path: source HEVC is pulled by MediaMTX and
+# sent to the browser unchanged. An unsupported codec is a startup failure.
+video:
+  mode: direct_hevc
+  allow_transcode_fallback: false
+
+output:
+  codec: hevc
+  pixel_format: yuv420p
+  low_latency: true
+  fps: null # null preserves the source nominal FPS
+
+service:
+  host: 0.0.0.0
+  port: 18080
+  public_host: ${PUBLIC_HOST:-127.0.0.1}
+  whep_port: 18889
