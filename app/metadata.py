@@ -49,6 +49,8 @@ def detection_message(result: DetectionResult, now: float | None = None) -> dict
 def track_message(result: TrackResult, actual_yolo_fps: float,
                   actual_tracker_fps: float = 0.0,
                   configured_bytetrack_prediction_fps: float = 5.0,
+                  requested_yolo_fps: float = 1.0,
+                  active_backend: str = "pytorch",
                   now: float | None = None) -> dict[str, Any]:
     """Convert ByteTrack output to normalized, metadata-only boxes."""
     now = time.monotonic() if now is None else now
@@ -96,6 +98,8 @@ def track_message(result: TrackResult, actual_yolo_fps: float,
         "last_yolo_age_ms": round(max(0.0, now - (result.yolo_completed_at or result.completed_at)) * 1000, 3),
         "last_track_update_age_ms": round(max(0.0, now - result.completed_at) * 1000, 3),
         "actual_yolo_fps": actual_yolo_fps,
+        "requested_yolo_fps": requested_yolo_fps,
+        "active_backend": active_backend,
         "actual_tracker_fps": actual_tracker_fps,
         "configured_bytetrack_prediction_fps": configured_bytetrack_prediction_fps,
         "active_track_count": result.active_track_count,
@@ -242,10 +246,12 @@ class MetadataHub:
 
     def publish_tracks(self, result: TrackResult, actual_yolo_fps: float,
                        actual_tracker_fps: float = 0.0,
-                       configured_bytetrack_prediction_fps: float = 5.0) -> None:
+                       configured_bytetrack_prediction_fps: float = 5.0,
+                       requested_yolo_fps: float = 1.0,
+                       active_backend: str = "pytorch") -> None:
         message = track_message(
             result, actual_yolo_fps, actual_tracker_fps,
-            configured_bytetrack_prediction_fps,
+            configured_bytetrack_prediction_fps, requested_yolo_fps, active_backend,
         )
         with self._lock:
             current = self._latest.get(result.camera_id)

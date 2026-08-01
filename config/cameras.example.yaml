@@ -27,18 +27,18 @@ detection:
   image_size: 640
   confidence: 0.40
   classes: [0]
-  target_fps_per_camera: 1
+  target_fps_per_camera: 2
   result_ttl_ms: 2000
   latest_frame_only: true
-  backend: auto
-  allow_backend_fallback: true
+  backend: tensorrt
+  allow_backend_fallback: false
   device: auto
-  precision: auto
+  precision: fp16 # requires models/yolo11n_640_fp16.engine
   batch_mode: serial
   inference_workers: 1
   torch_threads: 1
   torch_interop_threads: 1
-  capture_fps: 1
+  capture_fps: 3
   capture_max_dimension: 640
   max_frame_age_ms: 1500
   max_batch_wait_ms: 20
@@ -54,7 +54,7 @@ tracking:
   fuse_score: true
   hold_box_ms: 1500
   remove_track_ms: 2000
-  prediction_fps: 5
+  prediction_fps: 10
   prediction_deadzone_norm: 0.002
   max_prediction_displacement_norm_per_second: 0.25
 

@@ -137,7 +137,7 @@ YOLO/tracker rates, source (`yolo`/`predicted`), and confirmation age.
 ## Start and verify
 
 ```bash
-cd /mnt/guardex-nvme/local-vms-person-detection
+cd /mnt/guardex-nvme/vms-annotator
 cp .env.example .env
 chmod 600 .env
 ./scripts/start.sh config/cameras.yaml
@@ -201,6 +201,42 @@ Startup logs the effective FPS, source, and derived interval. `/metrics` and
 safe camera configuration responses expose the YAML value, optional override,
 effective value, and actual prediction/metadata rates; the browser debug view
 shows the effective tracker target rather than assuming five FPS.
+
+## Native TensorRT detection and rate overrides
+
+The direct HEVC browser path is independent of detection and is never
+re-encoded. Native `tensorrt` is the GPU backend: it loads a local FP16 engine,
+uses one CUDA stream with reusable host/device buffers, and exposes
+`TensorRT` as its execution provider. An explicit TensorRT request fails
+clearly if engine load or warm-up fails; it never silently falls back to CPU.
+`auto` first performs that native warm-up, then may use PyTorch CPU only if
+fallback is explicitly allowed. The rejected ONNX INT8 model is not selectable.
+
+`YOLO_INFERENCE_FPS` controls fresh detector results, while
+`AI_CAPTURE_FPS` controls source sampling and is automatically kept at least
+as high as YOLO's target. `BYTETRACK_PREDICTION_FPS` remains independent. All
+controls use: process environment, `.env`, selected YAML, then the built-in
+default. Restart after changing `.env`.
+
+```bash
+cd /mnt/guardex-nvme/vms-annotator
+./scripts/export_yolo_trt.sh
+
+DETECTION_BACKEND=tensorrt DETECTION_PRECISION=fp16 \
+TRT_ENGINE_MODEL=models/yolo11n_640_fp16.engine \
+AI_CAPTURE_FPS=3 YOLO_INFERENCE_FPS=2 \
+BYTETRACK_PREDICTION_FPS=10 ./scripts/start.sh config/cameras.yaml
+```
+
+TensorRT Python uses a narrow compatibility loader that appends only
+`/usr/lib/python3.10/dist-packages` before importing the installed JetPack
+binding. Do not `pip install tensorrt`.
+The export validates the FP32 static-batch-one 640×640 ONNX source, builds an
+ignored `models/yolo11n_640_fp16.engine`, load-benchmarks that exact engine,
+and atomically publishes it only after both stages pass. Engine files are tied
+to the installed TensorRT/CUDA/Jetson stack and must be rebuilt after a
+relevant platform upgrade. The runtime letterboxes BGR input, reverses that
+transform for boxes, uses person class 0 only, and applies one local NMS pass.
 
 Useful commands:
 

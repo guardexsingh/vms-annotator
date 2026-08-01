@@ -24,6 +24,7 @@ class InferenceScheduler:
                  on_stale: Callable[[str], None] | None = None,
                  on_compute: Callable[[str, float], None] | None = None) -> None:
         self.slots, self.detector, self.store, self.fps = slots, detector, store, fps_per_camera
+        self.interval = 1.0 / fps_per_camera
         self.on_result, self.on_error = on_result, on_error
         self.batch_mode = batch_mode
         self.max_frame_age = max_frame_age_ms / 1000
@@ -39,7 +40,7 @@ class InferenceScheduler:
         self._last_frame: dict[str, tuple[int, float]] = {}
 
     def start(self) -> None:
-        base, interval = time.monotonic(), 1.0 / self.fps
+        base, interval = time.monotonic(), self.interval
         batched = self.batch_mode in {"batch", "opportunistic"}
         self._next_due = {
             camera_id: base + (0 if batched else index * interval / max(1, len(self._order)))
@@ -93,7 +94,7 @@ class InferenceScheduler:
             self.on_error(camera_id, error)
 
     def _run_serial(self) -> None:
-        interval, cursor = 1.0 / self.fps, 0
+        interval, cursor = self.interval, 0
         while not self._stop.is_set():
             now = time.monotonic()
             if now < self._detector_blocked_until:
@@ -125,7 +126,7 @@ class InferenceScheduler:
                 self._inference_failed(camera_id, error, now)
 
     def _run_batch(self) -> None:
-        interval = 1.0 / self.fps
+        interval = self.interval
         while not self._stop.is_set():
             now = time.monotonic()
             if now < self._detector_blocked_until:

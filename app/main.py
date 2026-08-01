@@ -19,7 +19,8 @@ from .metadata import MetadataHub
 from .metrics import Metrics
 from .native_relay import NativeRelayPipeline
 from .stream_probe import probe_stream
-from .yolo_detector import YoloPersonDetector
+from .detection_backend import select_backend
+from .yolo_detector import YoloPersonDetector  # legacy test/extension compatibility
 
 LOG = logging.getLogger(__name__)
 
@@ -71,8 +72,18 @@ def main() -> int:
         config = load_config(args.config, environment)
     else:
         config = load_config(args.config)
+    LOG.info("Detection backend: %s; source: %s",
+             config.detection.backend, config.detection.backend_source)
+    LOG.info("YOLO inference FPS: %.1f; source: %s; interval: %.1f ms",
+             config.detection.target_fps_per_camera, config.detection.inference_fps_source,
+             1000.0 / config.detection.target_fps_per_camera)
+    LOG.info("AI capture FPS: %.1f; source: %s; interval: %.1f ms",
+             config.detection.capture_fps, config.detection.capture_fps_source,
+             1000.0 / config.detection.capture_fps)
+    LOG.info("Detection precision: %s; source: %s",
+             config.detection.precision, config.detection.precision_source)
     LOG.info(
-        "ByteTrack prediction FPS: %.1f; configuration source: %s; prediction interval: %.1f ms",
+        "ByteTrack prediction FPS: %.1f; source: %s; interval: %.1f ms",
         config.tracking.prediction_fps,
         config.tracking.prediction_fps_source,
         1000.0 / config.tracking.prediction_fps,
@@ -83,9 +94,9 @@ def main() -> int:
         if not config.detection.enabled:
             print({"detector": "disabled"})
             return 0
-        detector = YoloPersonDetector(config.detection.model, config.detection.image_size, config.detection.confidence)
+        detector, selection = select_backend(config.detection)
         try:
-            details = detector.preflight()
+            details = detector.warmup()
         except Exception as error:
             LOG.error("Detector preflight failed: %s", error)
             return 1
@@ -100,10 +111,10 @@ def main() -> int:
         samples.sort()
         print({"model_load_ms": detector.model_initialization_ms, "warmup_ms": detector.warmup_ms,
                "inference_p50_ms": samples[len(samples) // 2], "inference_p95_ms": samples[int(len(samples) * .95) - 1],
-               "device": detector.device, **details})
+               "device": selection.device, **details})
         return 0
 
-    metrics = Metrics()
+    metrics = Metrics(config)
     enabled = tuple(camera for camera in config.cameras if camera.enabled)
     if config.video.mode == "direct_hevc":
         try:
@@ -140,14 +151,14 @@ def main() -> int:
         metadata_hub=hub, metadata_path=config.metadata.path, cameras=config.cameras,
         ttl_ms=config.tracking.remove_track_ms, whep_port=config.service.whep_port,
         video_mode=config.video.mode, detection_runtime=detection_runtime,
-        tracking_config=config.tracking,
+        tracking_config=config.tracking, effective_config=config,
     )
     stop = threading.Event()
     def request_stop(*_): stop.set()
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
     for worker in workers:
-        metrics.camera(worker.config.id).requested_inference_fps = config.detection.fps_per_camera
+        metrics.camera(worker.config.id).requested_inference_fps = config.detection.target_fps_per_camera
         worker.start()
     for relay in relays:
         relay.start()

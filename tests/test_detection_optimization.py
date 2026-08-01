@@ -44,14 +44,11 @@ def _frame(sequence: int, age_seconds: float = 0.0) -> Frame:
                  time.monotonic() - age_seconds, sequence)
 
 
-def test_backend_selection_is_independent_and_unavailable_fallback_is_explicit():
+def test_explicit_tensorrt_selection_never_silently_falls_back():
     backend, selection = select_backend(DetectionConfig(backend="tensorrt"))
-    assert backend.name == "pytorch"
-    assert selection.selected == "pytorch"
-    assert selection.fallback_used is True
-    assert "TensorRT" in selection.fallback_reason
-    with pytest.raises(RuntimeError, match="TensorRT"):
-        select_backend(DetectionConfig(backend="tensorrt", allow_backend_fallback=False))
+    assert backend.name == "tensorrt"
+    assert selection.selected == "tensorrt"
+    assert selection.fallback_used is False
 
 
 def test_fallback_detail_is_visible_in_health_and_metrics(monkeypatch):
@@ -127,9 +124,9 @@ def test_selected_config_never_changes_frozen_video_or_adds_removed_camera():
     assert "mode: direct_hevc" in normal
     assert "allow_transcode_fallback: false" in normal
     assert "inference_workers: 1" in normal
-    assert "target_fps_per_camera: 1" in normal
+    assert "target_fps_per_camera: 3" in normal
     assert "torch_threads: 1" in normal
-    assert "capture_fps: 1" in normal
+    assert "capture_fps: 3" in normal
     roots = [PROJECT / name for name in ("app", "config", "scripts", "web")]
     searchable = "\n".join(
         path.read_text(errors="ignore").lower()

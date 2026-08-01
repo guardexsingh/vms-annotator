@@ -59,9 +59,9 @@ def test_locked_person_detection_configuration():
     assert config.detection.image_size == 640
     assert config.detection.classes == (0,)
     assert config.detection.confidence == 0.40
-    assert config.detection.target_fps_per_camera == 1
+    assert config.detection.target_fps_per_camera == 3
     assert config.detection.result_ttl_ms == 2000
-    assert config.detection.capture_fps == 1
+    assert config.detection.capture_fps == 3
     assert config.detection.inference_workers == 1
     assert config.detection.max_frame_age_ms == 1500
     assert config.tracking.tracker == "bytetrack"

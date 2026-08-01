@@ -101,6 +101,56 @@ def test_h264_mode_is_loaded_and_restricted(tmp_path: Path):
         load_config(config)
 
 
+def test_fp16_precision_requires_tensorrt_or_auto_backend(tmp_path: Path):
+    config = tmp_path / "precision.yml"
+    config.write_text("cameras:\n  - {id: entry, name: Entry, url: rtsp://example/live}\n"
+                      "detection: {backend: tensorrt, precision: fp16}\n")
+    assert load_config(config).detection.precision == "fp16"
+    config.write_text("cameras:\n  - {id: entry, name: Entry, url: rtsp://example/live}\n"
+                      "detection: {backend: pytorch, precision: fp16}\n")
+    with pytest.raises(ValueError, match="requires detection.backend=tensorrt"):
+        load_config(config)
+
+
+def test_ai_capture_environment_is_effective_and_never_caps_yolo(tmp_path: Path):
+    config = tmp_path / "capture.yml"
+    config.write_text("cameras:\n  - {id: entry, name: Entry, url: rtsp://example/live}\n"
+                      "detection: {target_fps_per_camera: 3, capture_fps: 1}\n")
+    promoted = load_config(config, {})
+    assert promoted.detection.capture_fps == 3
+    overridden = load_config(config, {"AI_CAPTURE_FPS": "4"})
+    assert overridden.detection.capture_fps == 4
+    assert overridden.detection.capture_fps_source == "AI_CAPTURE_FPS"
+
+
+def test_tensorrt_environment_controls_override_yaml_without_int8(tmp_path: Path):
+    config = tmp_path / "trt.yml"
+    config.write_text("cameras:\n  - {id: renamed-entry, name: Entry, url: rtsp://example/live}\n"
+                      "detection: {backend: pytorch, precision: fp32, target_fps_per_camera: 1, capture_fps: 1}\n")
+    loaded = load_config(config, {
+        "DETECTION_BACKEND": "tensorrt", "DETECTION_PRECISION": "fp16",
+        "TRT_ENGINE_MODEL": "models/yolo11n_640_fp16.engine", "YOLO_INFERENCE_FPS": "3",
+        "AI_CAPTURE_FPS": "3",
+    })
+    assert loaded.detection.backend == "tensorrt"
+    assert loaded.detection.backend_source == "DETECTION_BACKEND"
+    assert loaded.detection.precision == "fp16"
+    assert loaded.detection.precision_source == "DETECTION_PRECISION"
+    assert loaded.detection.trt_engine_model.endswith("_fp16.engine")
+    assert loaded.detection.target_fps_per_camera == loaded.detection.capture_fps == 3
+
+
+def test_int8_precision_and_engine_are_rejected(tmp_path: Path):
+    config = tmp_path / "no-int8.yml"
+    config.write_text("cameras:\n  - {id: entry, name: Entry, url: rtsp://example/live}\n"
+                      "detection: {backend: onnx, precision: int8}\n")
+    with pytest.raises(ValueError, match="Unsupported detection precision"):
+        load_config(config)
+    config.write_text("cameras:\n  - {id: entry, name: Entry, url: rtsp://example/live}\n")
+    with pytest.raises(ValueError, match="must not select an INT8"):
+        load_config(config, {"TRT_ENGINE_MODEL": "models/rejected_int8.engine"})
+
+
 def test_direct_hevc_is_default_and_never_allows_automatic_fallback(tmp_path: Path):
     config = tmp_path / "direct.yml"
     config.write_text("cameras:\n  - {id: entry, name: Entry, url: rtsp://example/cam}\n")

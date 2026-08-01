@@ -114,6 +114,16 @@ class _DetectionSession:
                 on_tick=lambda now: self.owner._prediction_tick(self, now),
                 on_skipped=lambda skipped: self.owner._prediction_skipped(self, skipped),
             )
+            self.owner.metrics.update_detector(
+                inference_scheduler_interval_ms=self.scheduler.interval * 1000,
+                prediction_scheduler_interval_ms=self.prediction_scheduler.interval * 1000,
+            )
+            LOG.info(
+                "Detection scheduler camera=%s: YOLO interval %.1f ms; ByteTrack prediction interval %.1f ms",
+                self.camera.id,
+                self.scheduler.interval * 1000,
+                self.prediction_scheduler.interval * 1000,
+            )
             self.prediction_scheduler.start()
             self.stop_event.wait()
         except Exception as error:
@@ -155,9 +165,10 @@ class DetectionRuntime:
 
     def start(self) -> None:
         for camera in self.cameras:
+            self.metrics.camera(camera.id)
             self.metrics.reset_detection(camera.id)
         self.metrics.set_detector(
-            "disabled", active_camera_id=None, requested_inference_fps=1.0,
+            "disabled", active_camera_id=None,
             tracker=self.config.tracking.tracker,
         )
         self.hub.active_camera(None, "disabled")
@@ -275,6 +286,16 @@ class DetectionRuntime:
             "active_camera_id": session.camera.id,
             "requested_backend": selection.requested,
             "selected_backend": selection.selected,
+            "active_backend": selection.selected,
+            "execution_provider": getattr(selection, "execution_provider", None),
+            "requested_yolo_fps": self.config.detection.target_fps_per_camera,
+            "yaml_yolo_fps": self.config.detection.yaml_target_fps_per_camera,
+            "yolo_fps_environment_override": self.config.detection.inference_fps_environment_override,
+            "yolo_fps_source": self.config.detection.inference_fps_source,
+            "requested_ai_capture_fps": self.config.detection.capture_fps,
+            "ai_capture_fps_source": self.config.detection.capture_fps_source,
+            "requested_precision": self.config.detection.precision,
+            "precision_source": self.config.detection.precision_source,
             "device": selection.device,
             "precision": selection.precision,
             "batch_mode": "serial",
@@ -362,6 +383,8 @@ class DetectionRuntime:
             self.metrics.camera_inference_fps(camera_id),
             self.metrics.camera_prediction_fps(camera_id),
             self.config.tracking.prediction_fps,
+            self.config.detection.target_fps_per_camera,
+            getattr(session.backend, "name", self.config.detection.backend),
         )
         session.last_metadata_at = now
         self.metrics.record_track_metadata(camera_id)

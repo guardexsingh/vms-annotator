@@ -39,15 +39,27 @@ def health_payload(metrics, mediamtx_url: str = "http://127.0.0.1:19997/v3/confi
              "detector_error": detector["error"]})
 
 
+def effective_detection_public(effective_config) -> dict[str, object]:
+    """Public, secret-free effective targets shared with the frontend."""
+    return {
+        "requested_backend": getattr(getattr(effective_config, "detection", None), "backend", None),
+        "requested_inference_fps": getattr(getattr(effective_config, "detection", None), "target_fps_per_camera", None),
+        "requested_ai_capture_fps": getattr(getattr(effective_config, "detection", None), "capture_fps", None),
+        "requested_precision": getattr(getattr(effective_config, "detection", None), "precision", None),
+        "configured_bytetrack_prediction_fps": getattr(getattr(effective_config, "tracking", None), "prediction_fps", None),
+    }
+
+
 class HealthServer:
     def __init__(self, host: str, port: int, metrics, web_root: Path, mediamtx_url: str | None = None,
                  metadata_hub=None, metadata_path: str = "/ws/detections", cameras=(), ttl_ms: int = 750,
                  whep_port: int = 18889, video_mode: str = "direct_hevc",
-                 detection_runtime=None, tracking_config=None) -> None:
+                 detection_runtime=None, tracking_config=None, effective_config=None) -> None:
         self.metrics, self.web_root = metrics, web_root
         self.mediamtx_url = mediamtx_url or "http://127.0.0.1:19997/v3/config/global/get"
         self.metadata_hub, self.metadata_path = metadata_hub, metadata_path
         self.detection_runtime = detection_runtime
+        self.effective_config = effective_config
         self.public_cameras = [{"id": camera.id, "name": camera.name, "stream_path": f"live/{camera.id}",
                                 "detection_enabled": camera.detection_enabled,
                                 "video_path": "direct" if video_mode == "direct_hevc" else "diagnostic",
@@ -64,6 +76,7 @@ class HealthServer:
             "prediction_fps_source": getattr(tracking_config, "prediction_fps_source", "built-in default"),
             "debug_labels": False,
         }
+        self.detection_public = effective_detection_public(effective_config)
         outer = self
         class Handler(SimpleHTTPRequestHandler):
             def __init__(self, *args, **kwargs):
@@ -96,6 +109,7 @@ class HealthServer:
                         "cameras": outer.public_cameras,
                         "detection_ttl_ms": outer.ttl_ms,
                         "tracking": outer.tracking_public,
+                        "detection": outer.detection_public,
                         "active_camera": active,
                         "whep_port": outer.whep_port,
                         "metadata_path": outer.metadata_path,

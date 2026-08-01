@@ -8,7 +8,7 @@ from pathlib import Path
 
 import psutil
 
-from .models import CameraMetrics
+from .models import AppConfig, CameraMetrics, DetectionConfig, TrackingConfig
 
 
 def _host_telemetry() -> dict[str, object]:
@@ -44,7 +44,15 @@ def _host_telemetry() -> dict[str, object]:
 
 
 class Metrics:
-    def __init__(self) -> None:
+    """Live metrics bound to the frozen effective application configuration."""
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        # AppConfig and its nested configs are frozen dataclasses.  Retaining
+        # this reference makes metrics, health, and runtime report the same
+        # resolved environment > YAML > default values.
+        self.config = config
+        self._detection_config = config.detection if config is not None else DetectionConfig()
+        self._tracking_config = config.tracking if config is not None else TrackingConfig()
         self.cameras: dict[str, CameraMetrics] = {}
         self._samples: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=4096))
         self._lock = threading.Lock()
@@ -61,16 +69,45 @@ class Metrics:
         self._last_track_confirmed: dict[str, float] = {}
         self._ai_decoder_processes: dict[str, psutil.Process] = {}
 
+    def _configured_detector_detail(self) -> dict[str, object]:
+        detection, tracking = self._detection_config, self._tracking_config
+        return {
+            "requested_backend": detection.backend,
+            "backend_source": detection.backend_source,
+            "requested_inference_fps": detection.target_fps_per_camera,
+            "requested_yolo_fps": detection.target_fps_per_camera,
+            "yolo_fps_source": detection.inference_fps_source,
+            "requested_ai_capture_fps": detection.capture_fps,
+            "ai_capture_fps_source": detection.capture_fps_source,
+            "requested_precision": detection.precision,
+            "precision_source": detection.precision_source,
+            "configured_bytetrack_prediction_fps": tracking.prediction_fps,
+            "prediction_fps": tracking.prediction_fps,
+            "prediction_fps_source": tracking.prediction_fps_source,
+        }
+
+    def _apply_configured_targets(self, metric: CameraMetrics) -> None:
+        metric.requested_inference_fps = self._detection_config.target_fps_per_camera
+        metric.requested_tracker_fps = self._tracking_config.prediction_fps
+        metric.configured_bytetrack_prediction_fps = self._tracking_config.prediction_fps
+
     def set_detector(self, state: str, error: str | None = None, **detail: object) -> None:
         if state not in {"loading", "ready", "failed", "disabled"}:
             raise ValueError(f"Invalid detector state: {state}")
         with self._lock:
             self._detector_state, self._detector_error = state, error
-            self._detector_detail = detail
+            self._detector_detail = {**self._configured_detector_detail(), **detail}
+
+    def update_detector(self, **detail: object) -> None:
+        """Attach runtime evidence without replacing effective config fields."""
+        with self._lock:
+            self._detector_detail = {**self._detector_detail, **detail}
 
     def camera(self, camera_id: str) -> CameraMetrics:
         with self._lock:
-            return self.cameras.setdefault(camera_id, CameraMetrics(camera_id))
+            metric = self.cameras.setdefault(camera_id, CameraMetrics(camera_id))
+            self._apply_configured_targets(metric)
+            return metric
 
     def record_inference(self, camera_id: str, result) -> None:
         total = (result.completed_at - result.inference_started_at) * 1000
@@ -145,7 +182,7 @@ class Metrics:
         with self._lock:
             metric = self.cameras[camera_id]
             for field, value in {
-                "requested_inference_fps": 1.0,
+                "requested_inference_fps": self._detection_config.target_fps_per_camera,
                 "completed_inference_fps": 0.0,
                 "ai_capture_fps": 0.0,
                 "ai_frames_consumed_fps": 0.0,
@@ -167,9 +204,9 @@ class Metrics:
                 "lost_track_count": 0,
                 "removed_track_count": 0,
                 "last_confirmed_age_ms": None,
-                "requested_tracker_fps": 5.0,
+                "requested_tracker_fps": self._tracking_config.prediction_fps,
                 "actual_tracker_fps": 0.0,
-                "configured_bytetrack_prediction_fps": 5.0,
+                "configured_bytetrack_prediction_fps": self._tracking_config.prediction_fps,
                 "actual_bytetrack_prediction_fps": 0.0,
                 "yolo_updates_total": 0,
                 "prediction_updates_total": 0,

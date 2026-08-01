@@ -316,11 +316,11 @@ if (typeof document !== "undefined") {
         message.receivedAt=performance.now();
         message.result_to_browser_latency_ms=Math.max(0,Date.now()-Number(message.completed_at_unix_ms || Date.now()));
         results.set(message.camera_id,message);
-        tile.querySelector(".inference").textContent=`${format(message.actual_yolo_fps," FPS")} / 1.0 target`;
+        tile.querySelector(".inference").textContent=`${format(message.actual_yolo_fps," FPS")} / ${format(message.requested_yolo_fps," FPS")} target`;
         if (debugLabels) {
           const source=message.prediction_only ? "predicted" : "yolo";
           tile.querySelector(".detector-message").textContent=
-            `YOLO: ${format(message.actual_yolo_fps," FPS")} · Tracker target: ${format(message.configured_bytetrack_prediction_fps," FPS")} · Tracker actual: ${format(message.actual_tracker_fps," FPS")} · Source: ${source} · Confirmed age: ${format(message.last_yolo_age_ms," ms")}`;
+            `Backend: ${message.active_backend === "tensorrt" ? "TensorRT FP16" : message.active_backend === "onnx" ? "ONNX CPU" : "PyTorch CPU"} · YOLO target: ${format(message.requested_yolo_fps," FPS")} · YOLO actual: ${format(message.actual_yolo_fps," FPS")} · Tracker target: ${format(message.configured_bytetrack_prediction_fps," FPS")} · Tracker actual: ${format(message.actual_tracker_fps," FPS")} · Source: ${source} · Confirmed age: ${format(message.last_yolo_age_ms," ms")}`;
         }
         redraw(message.camera_id);
       }

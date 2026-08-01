@@ -10,3 +10,5 @@ opencv-python==4.11.0.86
 PyYAML==6.0.2
 psutil==6.1.1
 scipy==1.15.3
+onnx==1.16.2
+onnxruntime==1.19.2
