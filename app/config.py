@@ -15,6 +15,7 @@ from .models import (
     MetadataConfig,
     OutputConfig,
     PipelineConfig,
+    RuntimeConfig,
     ServiceConfig,
     TrackingConfig,
     VideoConfig,
@@ -54,6 +55,10 @@ def yolo_inference_fps_environment_override(environ: dict[str, str] | None = Non
 
 def ai_capture_fps_environment_override(environ: dict[str, str] | None = None) -> float | None:
     return _finite_environment_fps("AI_CAPTURE_FPS", .2, 25, environ)
+
+
+def detection_confidence_environment_override(environ: dict[str, str] | None = None) -> float | None:
+    return _finite_environment_fps("DETECTION_CONFIDENCE", .01, 1.0, environ)
 
 
 def detection_precision_environment_override(environ: dict[str, str] | None = None) -> str | None:
@@ -181,6 +186,14 @@ def load_config(path: str | Path, environ: dict[str, str] | None = None) -> AppC
         "backend_source": "DETECTION_BACKEND" if backend_override is not None else
                           "config/cameras.yaml" if yaml_backend_configured else "built-in default",
     })
+    try:
+        yaml_confidence = float(detection_raw.get("confidence", DetectionConfig.confidence))
+    except (TypeError, ValueError):
+        raise ValueError("detection.confidence must be a number from 0.01 to 1") from None
+    confidence_override = detection_confidence_environment_override(environ)
+    detection_raw["confidence"] = confidence_override if confidence_override is not None else yaml_confidence
+    if not .01 <= float(detection_raw["confidence"]) <= 1:
+        raise ValueError("detection.confidence must be a number from 0.01 to 1")
     yaml_fps_configured = "target_fps_per_camera" in detection_raw
     try:
         yaml_fps = float(detection_raw.get("target_fps_per_camera", DetectionConfig.target_fps_per_camera))
@@ -289,12 +302,20 @@ def load_config(path: str | Path, environ: dict[str, str] | None = None) -> AppC
         raise ValueError("prediction_deadzone_norm must be between zero and .05")
     if not 0 < tracking.max_prediction_displacement_norm_per_second <= 1:
         raise ValueError("max_prediction_displacement_norm_per_second must be in (0, 1]")
+    runtime = RuntimeConfig(**raw.get("runtime", {}))
+    if runtime.mode not in {"standalone", "metadata_only"}:
+        raise ValueError(f"Unsupported runtime mode: {runtime.mode}")
     pipeline = PipelineConfig(**raw.get("pipeline", {}))
     if pipeline.mode not in {"native", "legacy_annotated"}:
         raise ValueError(f"Unsupported pipeline mode: {pipeline.mode}")
     video = VideoConfig(**raw.get("video", {}))
-    if video.mode not in {"direct_hevc", "diagnostic_transcode"}:
+    if video.mode not in {"direct_hevc", "diagnostic_transcode", "metadata_only"}:
         raise ValueError(f"Unsupported video mode: {video.mode}")
+    if runtime.mode == "metadata_only":
+        if video.mode != "metadata_only":
+            raise ValueError("metadata_only runtime requires video.mode=metadata_only")
+        if any(camera.detection_source != "camera" for camera in cameras if camera.enabled):
+            raise ValueError("metadata_only runtime requires detection_source=camera")
     if video.mode == "direct_hevc" and video.allow_transcode_fallback:
         raise ValueError("direct_hevc does not permit an automatic transcode fallback")
     if video.h264_mode not in {"copy", "transcode", "direct"}:
@@ -302,6 +323,13 @@ def load_config(path: str | Path, environ: dict[str, str] | None = None) -> AppC
     metadata = MetadataConfig(**raw.get("metadata", {}))
     if metadata.transport != "websocket" or not metadata.path.startswith("/"):
         raise ValueError("Metadata must use an absolute WebSocket path")
+    service_raw = dict(raw.get("service", {}))
+    try:
+        service_raw["port"] = int(service_raw.get("port", ServiceConfig.port))
+    except (TypeError, ValueError):
+        raise ValueError("service.port must be a valid TCP port") from None
+    if not 1 <= service_raw["port"] <= 65535:
+        raise ValueError("service.port must be a valid TCP port")
     return AppConfig(
         cameras=cameras,
         detection=DetectionConfig(**detection_raw),
@@ -310,5 +338,6 @@ def load_config(path: str | Path, environ: dict[str, str] | None = None) -> AppC
         video=video,
         pipeline=pipeline,
         metadata=metadata,
-        service=ServiceConfig(**raw.get("service", {})),
+        service=ServiceConfig(**service_raw),
+        runtime=runtime,
     )

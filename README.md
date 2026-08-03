@@ -276,3 +276,152 @@ this on-demand one-FPS controller.
 Diagnostic relay scripts remain explicitly separate from normal
 `video.mode: direct_hevc`; they are not selected by the checkmark or detection
 API.
+
+## Independent Docker metadata-only deployment
+
+The Docker deployment is intentionally separate from `guardex_vms` and does
+not start MediaMTX. It is an on-demand metadata service: it connects to an
+existing VMS MediaMTX RTSP path only while a camera detection session is
+active, then publishes normalized boxes on its application WebSocket. It never
+creates WHEP, RTSP, HLS, or an annotated video stream.
+
+This deployment targets the Jetson/JetPack 6.2 TensorRT 10.3 runtime used by
+the checked-in FP16 engine. It pins the R36.4 TensorRT runtime and Python
+binding to `10.3.0.30-1+cuda12.5`, the build used by the supplied engine.
+TensorRT plans are tied to the TensorRT/CUDA/Jetson software stack; startup
+logs the effective CUDA/TensorRT values plus engine filename and checksum
+prefix, then fails before HTTP/capture if deserialization is incompatible.
+The service does not rebuild the engine and explicit `tensorrt` never falls
+back to CPU.
+
+### Configure and build
+
+```bash
+cd /mnt/guardex-nvme/vms-annotator
+cp .env.example .env
+chmod 600 .env
+docker compose build
+```
+
+Edit only the placeholders in `.env`. `ANNOTATOR_CAMERA_RTSP_URL` must be the
+main VMS MediaMTX RTSP path published on the Docker host, for example
+`rtsp://host.docker.internal:8554/<tenant>/<nvr-id>_ch_01`. Do not commit a
+real tenant, path, camera credential, token, or private IP. `cam_01` is the
+default canonical camera ID and must match the future VMS camera mapping.
+
+The Compose service mounts the existing `models/yolo11n_640_fp16.engine` and
+`yolo11n.pt` read-only. Keep their filenames or update both `.env` paths and
+Compose mounts together. It exposes only application port `18080`; it neither
+joins nor depends on the VMS Compose project. Linux Docker resolves the host
+MediaMTX through `host.docker.internal:host-gateway`.
+
+The Docker-specific detector controls use `ANNOTATOR_*` names in `.env` and
+are mapped to the application's established `DETECTION_*` names only inside
+the container. This prevents old host-development environment settings from
+silently changing the Docker service backend or precision.
+
+### Run and inspect
+
+```bash
+docker compose up -d
+docker compose ps
+docker compose logs -f vms-annotator
+curl http://localhost:18080/healthz
+curl http://localhost:18080/api/cameras
+```
+
+The service starts healthy with its TensorRT backend pre-warmed and retained,
+but with no active camera, FFmpeg capture, inference scheduler, or tracker.
+Only one camera can be active at a time.
+
+```bash
+curl -X POST http://localhost:18080/api/detection/active-camera \
+  -H 'Content-Type: application/json' \
+  -d '{"camera_id":"cam_01"}'
+
+curl -X POST http://localhost:18080/api/detection/active-camera \
+  -H 'Content-Type: application/json' \
+  -d '{"camera_id":null}'
+```
+
+Stopping emits `clear_tracks` for the camera, terminates FFmpeg capture, stops
+the scheduler/prediction worker, and resets ByteTrack while retaining the
+pre-warmed detector for a fast next activation.
+
+### Metadata WebSocket
+
+Connect to `ws://localhost:18080/ws/detections` and subscribe:
+
+```json
+{"type":"subscribe","camera_ids":["cam_01"]}
+```
+
+Messages include `active_camera`, `detector_status`, `tracks`, and
+`clear_tracks`. A `tracks` message has `camera_id: "cam_01"`; each box uses
+normalized `x`, `y`, `width`, and `height` in `[0, 1]`, with `track_id`,
+confidence, source, and capture/completion timing. A client can confirm data
+by receiving a `tracks` message after activation. This endpoint has no VMS
+frontend integration in this phase.
+
+### Stop or remove
+
+```bash
+docker compose stop
+docker compose down
+```
+
+### Part 4A gateway-only mode
+
+The default Dockerfile target remains the legacy TensorRT detector. The new
+`gateway` target is a dependency-free metadata gateway and is validated
+separately; do not replace the live Part 3 service until Part 4B connects a
+producer.
+
+```text
+External analytics producer → POST /api/metadata → short-lived aggregate store
+→ active overlay session → /ws/detections → VMS overlay
+```
+
+Start an isolated gateway on a different host port:
+
+```bash
+docker build --target gateway -t vms-annotator-gateway:test .
+docker run --rm -p 18081:18080 \
+  -e ANNOTATOR_RUNTIME_MODE=gateway_only \
+  -e ANNOTATOR_ALLOWED_CAMERA_IDS=cam_03 \
+  -e METADATA_TTL_MS=2000 vms-annotator-gateway:test
+```
+
+`POST /api/metadata` accepts schema version 1 `analytics_metadata` or
+`clear_metadata` messages. Required fields are `source`, `camera_id`, and an
+integer millisecond `timestamp_ms`; analytics messages also carry normalized
+positive boxes, numeric `track_id`, and confidence in `[0,1]`. Identity is
+namespaced internally as `source:camera_id:track_id`; numeric IDs are retained
+for current VMS compatibility and `track_key` is supplied as an optional field.
+States expire after `METADATA_TTL_MS` (default 2000). Set
+`ANNOTATOR_INGEST_TOKEN` to require `Authorization: Bearer <token>`.
+
+The compatibility `POST /api/detection/active-camera` endpoint starts or stops
+an overlay-routing session only; it never starts FFmpeg or inference in gateway
+mode. The gateway image uses Python slim, no NVIDIA runtime, models, engines,
+RTSP, or media dependencies. The legacy internal detector remains available
+for rollback and diagnostics.
+
+### Troubleshooting
+
+* `host.docker.internal` fails: use current Docker Compose with the included
+  `extra_hosts` entry; verify `getent hosts host.docker.internal` inside the
+  container.
+* RTSP `8554` unavailable or wrong path: verify the main VMS stack is already
+  running and test the configured path from a trusted operator environment.
+  This compose project never starts or restarts VMS MediaMTX.
+* GPU/TensorRT failure: inspect `docker compose logs vms-annotator`. The
+  `tensorrt` backend is explicit and the container intentionally exits rather
+  than silently changing backend or regenerating the engine.
+* Camera ID rejected: `/api/cameras` exposes the configured
+  `ANNOTATOR_CAMERA_ID`; POST exactly that value.
+* No tracks: a successful health check means the service/model are ready, not
+  that the RTSP path is reachable. Activate the camera and inspect FFmpeg
+  capture status in `/healthz` and logs.
+* Container unhealthy: check engine/model mounts, the expected JetPack/TensorRT
+  compatibility, and that port `18080` is free on the host.

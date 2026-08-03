@@ -22,21 +22,29 @@ def set_active_camera_from_payload(runtime, payload: object) -> dict[str, object
     return runtime.set_active_camera(camera_id)
 
 
-def health_payload(metrics, mediamtx_url: str = "http://127.0.0.1:19997/v3/config/global/get") -> tuple[int, dict]:
+def health_payload(metrics, mediamtx_url: str | None = "http://127.0.0.1:19997/v3/config/global/get",
+                   runtime_mode: str = "standalone") -> tuple[int, dict]:
     payload = metrics.snapshot()
-    try:
-        with urllib.request.urlopen(mediamtx_url, timeout=0.5) as response:
-            mediamtx = "ready" if 200 <= response.status < 300 else "unavailable"
-    except (OSError, urllib.error.URLError):
-        mediamtx = "unavailable"
+    if runtime_mode == "metadata_only":
+        mediamtx = "not_applicable"
+    else:
+        try:
+            with urllib.request.urlopen(mediamtx_url, timeout=0.5) as response:
+                mediamtx = "ready" if 200 <= response.status < 300 else "unavailable"
+        except (OSError, urllib.error.URLError):
+            mediamtx = "unavailable"
     detector = payload["detector"]
-    ready = mediamtx == "ready"
+    ready = runtime_mode == "metadata_only" or mediamtx == "ready"
     video = {camera_id: value.get("video_status", "ready" if value["online"] else "offline")
              for camera_id, value in payload["cameras"].items()}
     return (HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
             {**payload, "status": "ok" if ready else "degraded", "http": "ready", "mediamtx": mediamtx,
              "video": video, "detector": {"status": detector["state"], **detector},
-             "detector_error": detector["error"]})
+             "detector_error": detector["error"], "runtime_mode": runtime_mode,
+             "active_camera": {"camera_id": detector.get("active_camera_id"),
+                               "status": detector["state"]},
+             "capture": {camera_id: value.get("ai_capture_status", "disabled")
+                         for camera_id, value in payload["cameras"].items()}})
 
 
 def effective_detection_public(effective_config) -> dict[str, object]:
@@ -53,19 +61,25 @@ def effective_detection_public(effective_config) -> dict[str, object]:
 class HealthServer:
     def __init__(self, host: str, port: int, metrics, web_root: Path, mediamtx_url: str | None = None,
                  metadata_hub=None, metadata_path: str = "/ws/detections", cameras=(), ttl_ms: int = 750,
-                 whep_port: int = 18889, video_mode: str = "direct_hevc",
+                 whep_port: int = 18889, video_mode: str = "direct_hevc", runtime_mode: str = "standalone",
                  detection_runtime=None, tracking_config=None, effective_config=None) -> None:
         self.metrics, self.web_root = metrics, web_root
+        self.runtime_mode = runtime_mode
         self.mediamtx_url = mediamtx_url or "http://127.0.0.1:19997/v3/config/global/get"
         self.metadata_hub, self.metadata_path = metadata_hub, metadata_path
         self.detection_runtime = detection_runtime
         self.effective_config = effective_config
-        self.public_cameras = [{"id": camera.id, "name": camera.name, "stream_path": f"live/{camera.id}",
-                                "detection_enabled": camera.detection_enabled,
-                                "video_path": "direct" if video_mode == "direct_hevc" else "diagnostic",
-                                "expected_codec": "hevc" if video_mode == "direct_hevc" else "h264",
-                                "transcoding": video_mode != "direct_hevc"}
-                               for camera in cameras if camera.enabled]
+        self.public_cameras = [
+            ({"id": camera.id, "name": camera.name, "detection_enabled": camera.detection_enabled,
+              "runtime_mode": runtime_mode}
+             if runtime_mode == "metadata_only" else
+             {"id": camera.id, "name": camera.name, "stream_path": f"live/{camera.id}",
+              "detection_enabled": camera.detection_enabled,
+              "video_path": "direct" if video_mode == "direct_hevc" else "diagnostic",
+              "expected_codec": "hevc" if video_mode == "direct_hevc" else "h264",
+              "transcoding": video_mode != "direct_hevc"})
+            for camera in cameras if camera.enabled
+        ]
         self.ttl_ms, self.whep_port = ttl_ms, whep_port
         self.tracking_public = {
             "hold_box_ms": getattr(tracking_config, "hold_box_ms", ttl_ms),
@@ -96,7 +110,11 @@ class HealthServer:
                     MetadataWebSocketSession(outer.metadata_hub, self.connection, self.rfile).run()
                     return
                 if self.path in {"/healthz", "/metrics"}:
-                    status, payload = health_payload(outer.metrics, outer.mediamtx_url)
+                    status, payload = health_payload(
+                        outer.metrics,
+                        None if outer.runtime_mode == "metadata_only" else outer.mediamtx_url,
+                        outer.runtime_mode,
+                    )
                     self._json(status, payload)
                     return
                 if self.path == "/api/cameras":
@@ -105,15 +123,17 @@ class HealthServer:
                         if outer.detection_runtime is not None
                         else {"camera_id": None, "status": "disabled"}
                     )
-                    self._json(HTTPStatus.OK, {
+                    response = {
                         "cameras": outer.public_cameras,
                         "detection_ttl_ms": outer.ttl_ms,
                         "tracking": outer.tracking_public,
                         "detection": outer.detection_public,
                         "active_camera": active,
-                        "whep_port": outer.whep_port,
                         "metadata_path": outer.metadata_path,
-                    })
+                    }
+                    if outer.runtime_mode != "metadata_only":
+                        response["whep_port"] = outer.whep_port
+                    self._json(HTTPStatus.OK, response)
                     return
                 if self.path == "/api/detection/active-camera":
                     state = (

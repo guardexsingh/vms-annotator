@@ -35,6 +35,7 @@ class _DetectionSession:
         self.capture: AICaptureWorker | None = None
         self.scheduler: InferenceScheduler | None = None
         self.prediction_scheduler: PredictionScheduler | None = None
+        self.uses_retained_backend = False
         self.last_metadata_at: float | None = None
         self.pending_yolo_metadata = None
 
@@ -64,21 +65,25 @@ class _DetectionSession:
 
     def _run(self) -> None:
         try:
-            self.backend, selection = select_backend(self.owner.config.detection)
-            while not self.stop_event.is_set():
-                try:
-                    details = self.backend.warmup()
-                    break
-                except Exception as error:
-                    summary = getattr(self.backend, "error_summary", None) or type(error).__name__
-                    self.owner._session_failed(self, summary)
-                    retry_after = getattr(self.backend, "retry_after", time.monotonic() + 2.0)
-                    wait = max(1.0, min(60.0, retry_after - time.monotonic()))
-                    if self.stop_event.wait(wait):
-                        return
-                    self.owner._session_loading(self)
+            if self.owner.config.runtime.mode == "metadata_only":
+                self.backend, selection, details = self.owner._retained_backend_for_session()
+                self.uses_retained_backend = True
             else:
-                return
+                self.backend, selection = select_backend(self.owner.config.detection)
+                while not self.stop_event.is_set():
+                    try:
+                        details = self.backend.warmup()
+                        break
+                    except Exception as error:
+                        summary = getattr(self.backend, "error_summary", None) or type(error).__name__
+                        self.owner._session_failed(self, summary)
+                        retry_after = getattr(self.backend, "retry_after", time.monotonic() + 2.0)
+                        wait = max(1.0, min(60.0, retry_after - time.monotonic()))
+                        if self.stop_event.wait(wait):
+                            return
+                        self.owner._session_loading(self)
+                else:
+                    return
             if self.stop_event.is_set() or not self.owner._is_current(self):
                 return
             self.tracker = ByteTrackPersonTracker(self.camera.id, self.owner.config.tracking)
@@ -138,7 +143,7 @@ class _DetectionSession:
                 self.capture.stop()
             self.slot.clear()
             self.reset_tracker()
-            if self.backend is not None:
+            if self.backend is not None and not self.uses_retained_backend:
                 self.backend.close()
 
 
@@ -157,6 +162,9 @@ class DetectionRuntime:
         self._status = "disabled"
         self._generation = 0
         self._session: _DetectionSession | None = None
+        self._retained_backend = None
+        self._retained_selection = None
+        self._retained_details: dict | None = None
         self._stopped = False
 
     @property
@@ -172,11 +180,77 @@ class DetectionRuntime:
             tracker=self.config.tracking.tracker,
         )
         self.hub.active_camera(None, "disabled")
+        if self.config.runtime.mode == "metadata_only":
+            self._prepare_retained_backend()
 
     def stop(self) -> None:
         with self._transition_lock:
             self._stopped = True
             self._disable_locked()
+            backend, self._retained_backend = self._retained_backend, None
+            self._retained_selection = None
+            self._retained_details = None
+        if backend is not None:
+            backend.close()
+
+    def _prepare_retained_backend(self) -> None:
+        """Fail startup early, then keep the loaded model/engine while idle.
+
+        Metadata-only deployment has one active camera at most, so one retained
+        backend is safe and avoids the model/engine warm-up on every alert.
+        Capture, inference scheduling, and tracking remain session-scoped.
+        """
+        backend = None
+        try:
+            backend, selection = select_backend(self.config.detection)
+            details = backend.warmup()
+        except Exception:
+            if backend is not None:
+                try:
+                    backend.close()
+                except Exception:
+                    pass
+            self.metrics.set_detector(
+                "failed", "Detector startup preflight failed", active_camera_id=None,
+                requested_inference_fps=self.config.detection.target_fps_per_camera,
+                tracker=self.config.tracking.tracker,
+            )
+            raise
+        self._retained_backend = backend
+        self._retained_selection = selection
+        self._retained_details = details
+        if selection.selected == "tensorrt":
+            LOG.info(
+                "TensorRT startup: architecture=%s l4t=%s cuda_runtime=%s "
+                "python=%s native=%s libnvinfer_package=%s python_package=%s "
+                "backend=%s engine=%s sha256_prefix=%s",
+                details.get("architecture"), details.get("l4t_release"),
+                details.get("cuda_runtime_version"), details.get("tensorrt_python_version"),
+                details.get("tensorrt_native_version"), details.get("libnvinfer_package_version"),
+                details.get("python_libnvinfer_package_version"), selection.selected,
+                details.get("engine_filename"), details.get("engine_sha256_prefix"),
+            )
+        self._set_retained_backend_metrics()
+
+    def _set_retained_backend_metrics(self) -> None:
+        """Expose a retained metadata-only TensorRT backend as ready while idle."""
+        selection, details = self._retained_selection, self._retained_details
+        if selection is None or details is None:
+            return
+        self.metrics.set_detector(
+            "ready", active_camera_id=None, requested_backend=selection.requested,
+            selected_backend=selection.selected, active_backend=selection.selected,
+            execution_provider=getattr(selection, "execution_provider", None),
+            device=selection.device, precision=selection.precision,
+            model_load_ms=details.get("model_load_ms"), warmup_ms=details.get("warmup_ms"),
+            requested_inference_fps=self.config.detection.target_fps_per_camera,
+            tracker=self.config.tracking.tracker,
+        )
+
+    def _retained_backend_for_session(self):
+        if self._retained_backend is None or self._retained_selection is None or self._retained_details is None:
+            raise RuntimeError("Metadata-only detector backend is not ready")
+        return self._retained_backend, self._retained_selection, self._retained_details
 
     def state(self) -> dict[str, object]:
         with self._state_lock:
@@ -234,11 +308,14 @@ class DetectionRuntime:
             session.stop()
         if old_camera is not None:
             self.metrics.reset_detection(old_camera)
-        self.metrics.set_detector(
-            "disabled", active_camera_id=None,
-            requested_inference_fps=self.config.detection.target_fps_per_camera,
-            tracker=self.config.tracking.tracker,
-        )
+        if self.config.runtime.mode == "metadata_only" and self._retained_backend is not None:
+            self._set_retained_backend_metrics()
+        else:
+            self.metrics.set_detector(
+                "disabled", active_camera_id=None,
+                requested_inference_fps=self.config.detection.target_fps_per_camera,
+                tracker=self.config.tracking.tracker,
+            )
         self.hub.active_camera(None, "disabled")
 
     def _is_current(self, session: _DetectionSession) -> bool:

@@ -264,6 +264,12 @@ class VideoConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeConfig:
+    """Deployment behavior independent of the legacy video pipeline."""
+    mode: str = "standalone"
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     mode: str = "native"
 
@@ -286,3 +292,4 @@ class AppConfig:
     pipeline: PipelineConfig
     metadata: MetadataConfig
     service: ServiceConfig
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)

@@ -1,0 +1,2 @@
+# The gateway uses only Python's standard library. This file documents the
+# intentionally empty dependency surface for lightweight deployments.

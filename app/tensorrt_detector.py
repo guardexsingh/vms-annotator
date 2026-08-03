@@ -7,6 +7,11 @@ ONNX Runtime execution provider is involved.
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
+import hashlib
+import os
+import platform
+import subprocess
 import sys
 import threading
 import time
@@ -41,17 +46,64 @@ def _import_tensorrt():
     return trt
 
 
+def _cuda_runtime_version(cuda: "_CudaRuntime") -> str:
+    value = ctypes.c_int()
+    code = cuda._lib.cudaRuntimeGetVersion(ctypes.byref(value))
+    if code != 0:
+        raise RuntimeError(f"CUDA runtime version query failed code={code}")
+    major, remainder = divmod(value.value, 1000)
+    return f"{major}.{remainder // 10}"
+
+
+def _native_tensorrt_version() -> tuple[str, str]:
+    library = ctypes.util.find_library("nvinfer") or "libnvinfer.so.10"
+    try:
+        native = ctypes.CDLL(library)
+        get_version = native.getInferLibVersion
+        get_version.restype = ctypes.c_int
+        encoded = int(get_version())
+    except (AttributeError, OSError) as error:
+        raise RuntimeError("Native TensorRT library is unavailable") from error
+    major, remainder = divmod(encoded, 10_000)
+    minor, patch = divmod(remainder, 100)
+    return f"{major}.{minor}.{patch}", library
+
+
+def _installed_package_version(package: str) -> str | None:
+    result = subprocess.run(
+        ["dpkg-query", "-W", "-f=${Version}", package],
+        capture_output=True, text=True, check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _l4t_release() -> str:
+    try:
+        return Path("/etc/nv_tegra_release").read_text(encoding="utf-8").splitlines()[0].strip()
+    except (IndexError, OSError):
+        pinned = os.environ.get("ANNOTATOR_L4T_RELEASE")
+        return f"{pinned} (pinned package source)" if pinned else "not-present-in-image"
+
+
 def tensorrt_binding_info() -> dict[str, object]:
-    """Report binding source and CUDA readiness without logging secrets."""
+    """Report effective TensorRT/CUDA runtime information without secrets."""
     trt = _import_tensorrt()
     cuda = _CudaRuntime()
     count = ctypes.c_int()
     code = cuda._lib.cudaGetDeviceCount(ctypes.byref(count))
     if code != 0 or count.value < 1:
         raise RuntimeError(f"CUDA/GPU readiness failed code={code} count={count.value}")
+    native_version, native_library = _native_tensorrt_version()
     return {
+        "architecture": platform.machine(),
+        "l4t_release": _l4t_release(),
+        "cuda_runtime_version": _cuda_runtime_version(cuda),
         "tensorrt_python_version": trt.__version__,
         "tensorrt_binding_path": str(Path(trt.__file__).resolve()),
+        "tensorrt_native_version": native_version,
+        "tensorrt_native_library": native_library,
+        "libnvinfer_package_version": _installed_package_version("libnvinfer10"),
+        "python_libnvinfer_package_version": _installed_package_version("python3-libnvinfer"),
         "cuda_device_count": int(count.value),
         "gpu_ready": True,
     }
@@ -82,6 +134,8 @@ class _CudaRuntime:
         self._lib.cudaMemcpyAsync.restype = ctypes.c_int
         self._lib.cudaGetDeviceCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
         self._lib.cudaGetDeviceCount.restype = ctypes.c_int
+        self._lib.cudaRuntimeGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        self._lib.cudaRuntimeGetVersion.restype = ctypes.c_int
 
     @staticmethod
     def _check(code: int, operation: str) -> None:
@@ -157,6 +211,12 @@ class TensorRTPersonDetector(DetectionBackend):
                     raise FileNotFoundError("TensorRT engine is missing; run scripts/export_yolo_trt.sh")
                 started = time.monotonic()
                 trt = _import_tensorrt()
+                binding = tensorrt_binding_info()
+                if str(binding["tensorrt_python_version"]) != str(binding["tensorrt_native_version"]):
+                    raise RuntimeError(
+                        "TensorRT Python/native version mismatch: "
+                        f"python={binding['tensorrt_python_version']} native={binding['tensorrt_native_version']}"
+                    )
                 logger = trt.Logger(trt.Logger.ERROR)
                 runtime = trt.Runtime(logger)
                 engine = runtime.deserialize_cuda_engine(self.engine_path.read_bytes())
@@ -208,8 +268,12 @@ class TensorRTPersonDetector(DetectionBackend):
         """Startup-safe TensorRT binding and engine path report."""
         info = tensorrt_binding_info()
         info.update({
-            "engine": str(self.engine_path),
+            "engine_filename": self.engine_path.name,
             "engine_exists": self.engine_path.is_file(),
+            "engine_sha256_prefix": (
+                hashlib.sha256(self.engine_path.read_bytes()).hexdigest()[:12]
+                if self.engine_path.is_file() else None
+            ),
             "precision": self.precision,
             "backend": self.name,
         })
@@ -243,7 +307,7 @@ class TensorRTPersonDetector(DetectionBackend):
             "reuses_engine": True, "reuses_context": True, "reuses_cuda_stream": True,
             "reuses_buffers": True,
         }
-        details.update(tensorrt_binding_info())
+        details.update(self.preflight())
         return details
 
     def _prepare(self, image: np.ndarray) -> tuple[float, int, int]:

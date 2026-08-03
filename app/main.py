@@ -27,6 +27,8 @@ LOG = logging.getLogger(__name__)
 
 def build_video_components(config, metrics: Metrics) -> tuple[list[NativeRelayPipeline], list[CameraWorker]]:
     """Select video components without consulting detector state."""
+    if config.runtime.mode == "metadata_only":
+        return ([], [])
     if config.video.mode == "direct_hevc":
         return ([], [])
     if config.video.h264_mode == "direct":
@@ -74,6 +76,12 @@ def main() -> int:
         config = load_config(args.config)
     LOG.info("Detection backend: %s; source: %s",
              config.detection.backend, config.detection.backend_source)
+    LOG.info("Runtime mode: %s; configured cameras: %s", config.runtime.mode,
+             ", ".join(camera.id for camera in config.cameras if camera.enabled))
+    LOG.info("Detector assets: model=%s engine=%s precision=%s",
+             Path(config.detection.model).name,
+             Path(config.detection.trt_engine_model or "").name or "default",
+             config.detection.precision)
     LOG.info("YOLO inference FPS: %.1f; source: %s; interval: %.1f ms",
              config.detection.target_fps_per_camera, config.detection.inference_fps_source,
              1000.0 / config.detection.target_fps_per_camera)
@@ -116,7 +124,7 @@ def main() -> int:
 
     metrics = Metrics(config)
     enabled = tuple(camera for camera in config.cameras if camera.enabled)
-    if config.video.mode == "direct_hevc":
+    if config.video.mode == "direct_hevc" and config.runtime.mode != "metadata_only":
         try:
             validation = load_validation(Path(args.video_validation))
         except (OSError, ValueError) as error:
@@ -129,7 +137,11 @@ def main() -> int:
     for camera in config.cameras:
         metric = metrics.camera(camera.id)
         metric.ai_capture_status = "disabled"
-        if config.video.mode == "direct_hevc" and camera.enabled:
+        if config.runtime.mode == "metadata_only" and camera.enabled:
+            metric.video_status, metric.video_path = "metadata_only", "metadata_only"
+            metric.decoder, metric.encoder = "none", "none"
+            metric.raw_frames_through_python = False
+        elif config.video.mode == "direct_hevc" and camera.enabled:
             validated = validation[camera.id]
             metric.codec = metric.source_codec = str(validated["source_codec"])
             metric.mediamtx_codec = str(validated["mediamtx_codec"])
@@ -150,7 +162,8 @@ def main() -> int:
         config.service.host, config.service.port, metrics, Path(__file__).parents[1] / "web",
         metadata_hub=hub, metadata_path=config.metadata.path, cameras=config.cameras,
         ttl_ms=config.tracking.remove_track_ms, whep_port=config.service.whep_port,
-        video_mode=config.video.mode, detection_runtime=detection_runtime,
+        video_mode=config.video.mode, runtime_mode=config.runtime.mode,
+        detection_runtime=detection_runtime,
         tracking_config=config.tracking, effective_config=config,
     )
     stop = threading.Event()
@@ -165,7 +178,7 @@ def main() -> int:
     hub.start()
     if detection_runtime:
         detection_runtime.start()
-    LOG.info("VMS prototype listening on :%s", config.service.port)
+    LOG.info("Metadata service listening on %s:%s", config.service.host, config.service.port)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     stop.wait()
