@@ -1,70 +1,20 @@
 .env
-logs/
-model-cache/
-run/*.yml
-run/*.yaml
-run/video-validation.json
-__pycache__/
-*.pyc
-
-# Local environment and secrets
-.env
 .env.*
 !.env.example
-
-# Python environment and caches
-.venv/
-venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Runtime files
+.venv/
+venv/
 logs/
-*.log
-*.pid
-*.sock
-tmp/
-runtime/
-
-# Generated inference artifacts
+run/
+models/
+config/cameras.yaml
+config/cameras.relay.yaml
 *.engine
 *.plan
 *.trt
 *.onnx
-
-# Editor and OS files
 .vscode/
 .idea/
 .DS_Store
-
-# Secrets and local configuration
-.env
-.env.*
-!.env.example
-auto.key
-auto.crt
-config/cameras.yaml
-config/cameras.relay.yaml
-
-# Python environment and caches
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-
-# Runtime-generated data
-run/
-logs/
-*.log
-*.pid
-*.sock
-
-# Generated inference artifacts
-*.engine
-*.plan
-*.trt
-*.onnx

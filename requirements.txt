@@ -1,1 +1,1 @@
--r requirements-runtime.txt
+# The VMS metadata gateway uses only Python's standard library.

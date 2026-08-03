@@ -3,41 +3,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        JETSON_L4T_RELEASE: r36.4
-        TENSORRT_VERSION: 10.3.0.30-1+cuda12.5
+    image: vms-annotator:gateway
     container_name: vms-annotator
     restart: unless-stopped
-    environment:
-      ANNOTATOR_RUNTIME_MODE: ${ANNOTATOR_RUNTIME_MODE:-metadata_only}
-      ANNOTATOR_BIND_HOST: ${ANNOTATOR_BIND_HOST:-0.0.0.0}
-      ANNOTATOR_PORT: ${ANNOTATOR_PORT:-18080}
-      ANNOTATOR_CAMERA_ID: ${ANNOTATOR_CAMERA_ID:-cam_01}
-      ANNOTATOR_CAMERA_NAME: ${ANNOTATOR_CAMERA_NAME:-VMS Camera 01}
-      ANNOTATOR_CAMERA_RTSP_URL: ${ANNOTATOR_CAMERA_RTSP_URL:?set ANNOTATOR_CAMERA_RTSP_URL in .env}
-      ANNOTATOR_MODEL_PATH: ${ANNOTATOR_MODEL_PATH:-models/yolo11n.pt}
-      DETECTION_BACKEND: ${ANNOTATOR_DETECTION_BACKEND:-tensorrt}
-      DETECTION_PRECISION: ${ANNOTATOR_DETECTION_PRECISION:-fp16}
-      TRT_ENGINE_MODEL: ${ANNOTATOR_TRT_ENGINE_MODEL:-models/yolo11n_640_fp16.engine}
-      AI_CAPTURE_FPS: ${ANNOTATOR_CAPTURE_FPS:-3}
-      YOLO_INFERENCE_FPS: ${ANNOTATOR_INFERENCE_FPS:-3}
-      BYTETRACK_PREDICTION_FPS: ${ANNOTATOR_PREDICTION_FPS:-5}
-      DETECTION_CONFIDENCE: ${ANNOTATOR_CONFIDENCE:-0.40}
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
     ports:
       - "${ANNOTATOR_HOST_PORT:-18080}:18080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    runtime: nvidia
-    volumes:
-      - ./config/metadata-only.yaml:/app/config/metadata-only.yaml:ro
-      - ./models/yolo11n_640_fp16.engine:/app/models/yolo11n_640_fp16.engine:ro
-      - ./yolo11n.pt:/app/models/yolo11n.pt:ro
+    environment:
+      ANNOTATOR_RUNTIME_MODE: gateway_only
+      ANNOTATOR_ALLOWED_CAMERA_IDS: ${ANNOTATOR_ALLOWED_CAMERA_IDS:-cam_03}
+      METADATA_TTL_MS: ${METADATA_TTL_MS:-2000}
+      ANNOTATOR_INGEST_TOKEN: ${ANNOTATOR_INGEST_TOKEN:-}
     healthcheck:
-      test:
-        ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/healthz', timeout=2).read()"]
-      interval: 15s
-      timeout: 5s
-      retries: 4
-      start_period: 45s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/healthz', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
