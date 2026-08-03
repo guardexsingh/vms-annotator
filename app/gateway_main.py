@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64, hashlib, hmac, json, os, socket, struct, threading, time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from .evidence_journal import EvidenceJournal
 
 MAX_BODY = 262_144
 MAX_OBJECTS = 100
@@ -37,8 +38,11 @@ class Gateway:
         self.cameras=frozenset(x.strip() for x in os.getenv("ANNOTATOR_ALLOWED_CAMERA_IDS","cam_03").split(",") if x.strip())
         self.ttl=max(100, int(os.getenv("METADATA_TTL_MS","2000")))/1000
         self.token=os.getenv("ANNOTATOR_INGEST_TOKEN")
+        self.export_token=os.getenv("ANNOTATOR_EVIDENCE_EXPORT_TOKEN")
+        self.backfill_token=os.getenv("ANNOTATOR_EVIDENCE_BACKFILL_TOKEN")
+        self.journal=EvidenceJournal()
         self.active=None; self.states={}; self.clients=[]; self.lock=threading.RLock()
-        self.counters={"messages_received":0,"messages_accepted":0,"messages_rejected":0,"objects_received":0,"messages_broadcast":0,"explicit_clears":0,"ttl_clears":0}
+        self.counters={"messages_received":0,"messages_accepted":0,"messages_rejected":0,"objects_received":0,"messages_broadcast":0,"explicit_clears":0,"ttl_clears":0,"backfill_requests":0,"backfill_samples":0,"backfill_rejected":0}
         threading.Thread(target=self.expire, daemon=True).start()
     def state(self): return {"camera_id":self.active,"status":"active" if self.active else "disabled"}
     def send(self, client, message):
@@ -101,7 +105,7 @@ def main():
             raw=json.dumps(data,separators=(",",":")).encode(); self.send_response(status); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(raw))); self.send_header("Cache-Control","no-store"); self.end_headers(); self.wfile.write(raw)
         def _get(self):
             if self.path=="/healthz" or self.path=="/metrics":
-                with gateway.lock: self.json(200,{"status":"ok","runtime_mode":"gateway_only","http":"ready","gateway":{"status":"ready","active_camera_id":gateway.active,"active_sessions":int(bool(gateway.active)),"known_sources":sorted({k[0] for k in gateway.states}),"fresh_metadata_streams":len(gateway.states)},"metadata":{**gateway.counters,"websocket_clients":len(gateway.clients)},"detector":{"status":"not_applicable"},"capture":{"status":"not_applicable"}}); return
+                with gateway.lock: self.json(200,{"status":"ok","runtime_mode":"gateway_only","http":"ready","gateway":{"status":"ready","active_camera_id":gateway.active,"active_sessions":int(bool(gateway.active)),"known_sources":sorted({k[0] for k in gateway.states}),"fresh_metadata_streams":len(gateway.states)},"metadata":{**gateway.counters,**gateway.journal.metrics(),"websocket_clients":len(gateway.clients)},"detector":{"status":"not_applicable"},"capture":{"status":"not_applicable"}}); return
             if self.path=="/api/cameras": self.json(200,{"cameras":[{"id":c,"runtime_mode":"gateway_only","metadata_enabled":True} for c in sorted(gateway.cameras)],"metadata_path":"/ws/detections","active_camera":gateway.state()}); return
             if self.path=="/api/detection/active-camera": self.json(200,gateway.state()); return
             self.send_error(404)
@@ -117,6 +121,42 @@ def main():
                     if old and not camera: gateway.broadcast({"type":"clear_tracks","camera_id":old})
                     if camera: gateway.aggregate(camera)
                 self.json(200,gateway.state()); return
+            if self.path=="/api/evidence/export":
+                if gateway.export_token and not hmac.compare_digest(self.headers.get("Authorization",""),f"Bearer {gateway.export_token}"): self.json(401,{"error":"unauthorized"}); return
+                try:
+                    if not isinstance(payload,dict) or payload.get("schema_version") != 1: raise ValueError("unsupported schema_version")
+                    for field in ("source","camera_id","event_id","alert_mongo_id"):
+                        if not isinstance(payload.get(field),str) or not payload[field] or len(payload[field]) > 160: raise ValueError(f"invalid {field}")
+                    if payload["camera_id"] not in gateway.cameras: raise ValueError("invalid camera_id")
+                    clip=payload.get("clip")
+                    if not isinstance(clip,dict): raise ValueError("invalid clip")
+                    for field in ("relative_path","timing_basis"):
+                        if not isinstance(clip.get(field),str) or not clip[field] or len(clip[field]) > 320: raise ValueError(f"invalid clip.{field}")
+                    for field in ("capture_start_timestamp_ms","capture_end_timestamp_ms","duration_ms","width","height","alert_received_timestamp_ms"):
+                        if not isinstance(clip.get(field),int) or isinstance(clip[field],bool) or clip[field] < 0: raise ValueError(f"invalid clip.{field}")
+                    if clip["duration_ms"] <= 0 or clip["duration_ms"] > 600_000 or clip["width"] <= 0 or clip["height"] <= 0: raise ValueError("invalid clip dimensions or duration")
+                    if "wait_for_coverage" in payload and not isinstance(payload["wait_for_coverage"],bool): raise ValueError("invalid wait_for_coverage")
+                    if "settle_ms" in payload and (not isinstance(payload["settle_ms"],(int,float)) or isinstance(payload["settle_ms"],bool)): raise ValueError("invalid settle_ms")
+                    self.json(200,gateway.journal.export(payload))
+                except FileNotFoundError: self.json(404,{"error":"journal_not_found"})
+                except ValueError as error: gateway.journal.counters["evidence_export_failures"]+=1; self.json(400,{"error":str(error)})
+                except Exception: gateway.journal.counters["evidence_export_failures"]+=1; self.json(500,{"error":"evidence_export_failed"})
+                return
+            if self.path=="/api/evidence/backfill":
+                if gateway.backfill_token and not hmac.compare_digest(self.headers.get("Authorization",""),f"Bearer {gateway.backfill_token}"): self.json(401,{"error":"unauthorized"}); return
+                try:
+                    if not isinstance(payload,dict) or payload.get("schema_version")!=1 or payload.get("type")!="evidence_metadata_backfill": raise ValueError("invalid backfill schema")
+                    samples=payload.get("samples"); maximum=max(1,min(500,int(os.getenv("ANNOTATOR_EVIDENCE_BACKFILL_MAX_SAMPLES","500"))))
+                    if not isinstance(samples,list) or not samples or len(samples)>maximum: raise ValueError("invalid backfill samples")
+                    canonical=[]
+                    for sample in samples:
+                        if not isinstance(sample,dict): raise ValueError("invalid backfill sample")
+                        live={"schema_version":1,"type":"analytics_metadata","source":payload.get("source"),"camera_id":payload.get("camera_id"),"event_id":payload.get("event_id"),"event_type":payload.get("event_type"),"timestamp_ms":sample.get("timestamp_ms"),"objects":sample.get("objects")}
+                        source,camera,event,boxes=validate(live,gateway); canonical.append({"schema_version":1,"type":"analytics_metadata","source":source,"camera_id":camera,"event_id":event,"event_type":payload.get("event_type"),"timestamp_ms":live["timestamp_ms"],"gateway_received_timestamp_ms":int(time.time()*1000),"objects":boxes,"backfill":True,"backfill_complete":bool(payload.get("backfill_complete"))})
+                    for record in canonical: gateway.journal.submit(record)
+                    gateway.counters["backfill_requests"]+=1; gateway.counters["backfill_samples"]+=len(canonical); self.json(202,{"ok":True,"samples":len(canonical)})
+                except ValueError as error: gateway.counters["backfill_rejected"]+=1; self.json(400,{"error":str(error)})
+                return
             if self.path!="/api/metadata": self.send_error(404); return
             if gateway.token and not hmac.compare_digest(self.headers.get("Authorization",""),f"Bearer {gateway.token}"): self.json(401,{"error":"unauthorized"}); return
             gateway.counters["messages_received"]+=1
@@ -129,6 +169,11 @@ def main():
                     gateway.states[key]={"camera_id":camera,"received":time.monotonic(),"timestamp":payload["timestamp_ms"],"boxes":boxes}; gateway.counters["objects_received"]+=len(boxes)
                 gateway.counters["messages_accepted"]+=1
                 if camera==gateway.active: gateway.aggregate(camera)
+            # Journal after validation and independently of live state/routing.  It is intentionally
+            # best-effort: queue pressure or writer failures never alter this accepted response.
+            gateway.journal.submit({"schema_version":1,"type":payload["type"],"source":source,"camera_id":camera,
+                                    "event_id":event,"event_type":payload.get("event_type"),"timestamp_ms":payload["timestamp_ms"],
+                                    "gateway_received_timestamp_ms":int(time.time()*1000),"objects":boxes})
             self.json(202,{"ok":True})
         def do_GET_ws(self): pass
         def do_GET(self):
